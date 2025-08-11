@@ -1,0 +1,13 @@
+.wrap { font-family: Inter, system-ui, sans-serif; padding: 12px; }
+.header { display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; }
+.actions { display:flex; align-items:center; gap:8px; }
+.status { opacity:0.7; }
+button { padding: 6px 10px; border: 1px solid #ccc; border-radius: 6px; background: #f5f5f5; cursor: pointer; }
+button:hover { background: #ececec; }
+.warn { margin-top: 12px; padding: 8px; background: #FFF3CD; border: 1px solid #FFECB5; }
+.previewRow { display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-top:12px; }
+.previewPanel { display:flex; flex-direction:column; gap:8px; }
+.toolbar { display:flex; align-items:center; gap:8px; }
+.previewCanvas { width: 100%; height: 1000px; border:1px dashed #bbb; border-radius:8px; background:#fff; }
+.jsonPanel { max-height: 420px; overflow: auto; }
+.jsonOut { max-height: 420px; overflow:auto; background:#111; color:#eee; padding:8px; border-radius:8px; }

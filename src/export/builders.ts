@@ -8,13 +8,18 @@ import { Reporter } from './reporter';
 
 export function buildGameObject(go: GroupNode, level: FrameNode, reporter: Reporter): GameObjectData {
   const name = go.name.replace(/^GameObject:/, '').trim();
-  const position = getPositionWithAnchorAdjustment(go, level);
+
+  // NEW: use rigid body AABB center
+  const rbCenter = computeRigidBodyCenter(go, level);
+
   const rotation = getNodeRotation(go);
   const bodyType = findBodyType(go) || 'Static';
   const customParams = findCustomParams(go);
-  const collider = buildCollider(go, level, reporter);
 
-  return { name, position, rotation, collider, bodyType, customParams };
+  // pass the rbCenter down so colliders are relative to it
+  const collider = buildCollider(go, level, reporter, rbCenter);
+
+  return { name, position: rbCenter, rotation, collider, bodyType, customParams };
 }
 
 function findBodyType(go: GroupNode): GameObjectData['bodyType'] | null {
@@ -42,12 +47,12 @@ function findCustomParams(go: GroupNode): Record<string,string> {
   return params;
 }
 
-function buildCollider(go: GroupNode, level: FrameNode, reporter: Reporter): ColliderData | null {
+function buildCollider(go: GroupNode, level: FrameNode, reporter: Reporter, anchor: Vec2): ColliderData | null {
   // If there are multiple Collider:* nodes, wrap in Compound
   const colliders = go.children.filter(n => n.name.startsWith('Collider:'));
   if (colliders.length === 0) { reporter.warn(`GameObject ${go.name} has no Collider:* node.`); return null; }
   if (colliders.length > 1) {
-    const children = colliders.map(n => buildSingleCollider(n, go, level, reporter)).filter(Boolean) as ColliderData[];
+    const children = colliders.map(n => buildSingleCollider(n, go, level, reporter, anchor)).filter(Boolean) as ColliderData[];
     const compound: CompoundCollider = {
       type: 'Compound',
       position: [0,0],
@@ -57,28 +62,31 @@ function buildCollider(go: GroupNode, level: FrameNode, reporter: Reporter): Col
     reporter.bump('Compound');
     return compound;
   }
-  return buildSingleCollider(colliders[0], go, level, reporter);
+  return buildSingleCollider(colliders[0], go, level, reporter, anchor);
 }
 
-function buildSingleCollider(node: SceneNode, go: GroupNode, level: FrameNode, reporter: Reporter): ColliderData | null {
+function buildSingleCollider(node: SceneNode, go: GroupNode, level: FrameNode, reporter: Reporter, anchor: Vec2): ColliderData | null {
   if (!node.name.startsWith('Collider:')) return null;
   const type = node.name.replace(/^Collider:/,'').trim();
-  const localPos = localOffsetBetween(node, go, level);
+
+  // local offset/rotation RELATIVE TO RIGID BODY (anchor), not the GO center
   const localRot = getNodeRotation(node) - getNodeRotation(go);
 
   switch (type) {
     case 'Cuboid': {
       if (!('width' in node && 'height' in node)) { reporter.warn(`${node['name']} missing width/height.`); return null; }
       const size: [number, number] = [(node as any).width, (node as any).height];
-      const out: CuboidCollider = { type: 'Cuboid', position: localPos, rotation: localRot, size };
+      const position = localOffsetToAnchor(node, anchor, level);       // CHANGED
+      const out: CuboidCollider = { type: 'Cuboid', position, rotation: localRot, size };
       reporter.bump('Cuboid');
       return out;
     }
     case 'Ball': {
       if (!('width' in node && 'height' in node)) { reporter.warn(`${node['name']} missing width/height.`); return null; }
       const w = (node as any).width as number; const h = (node as any).height as number;
-      const radius = (w + h) * 0.25; // avg of half-axes (robust against non-uniform scale → use ellipse approx)
-      const out: BallCollider = { type: 'Ball', position: localPos, rotation: localRot, radius };
+      const radius = (w + h) * 0.25;
+      const position = localOffsetToAnchor(node, anchor, level);       // CHANGED
+      const out: BallCollider = { type: 'Ball', position, rotation: localRot, radius };
       reporter.bump('Ball');
       return out;
     }
@@ -86,37 +94,25 @@ function buildSingleCollider(node: SceneNode, go: GroupNode, level: FrameNode, r
       const worldVertsTL = getWorldPolygonVertices(node);
       const vertsRapierWorld = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
 
-      const goPos: Vec2 = getPositionWithAnchorAdjustment(go, level);
+      // Use RB anchor (AABB center) + GO rotation
       const goRot = getNodeRotation(go);
-      const vertsGoLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, goPos, goRot));
+      const vertsRBLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, anchor, goRot)); // CHANGED
 
-      const cw = ensureClockwise(vertsGoLocal as any);
+      const cw = ensureClockwise(vertsRBLocal as any);
       const { center: polyCenter, vertices: centered } = centerVertices(cw);
 
       const needDecomp = !isConvexSafe(centered) && centered.length > 3;
-
       if (needDecomp) {
-        const parts = decomposeIfNeeded(centered); // вернёт >=1 CW-часть
+        const parts = decomposeIfNeeded(centered);
         const children = parts.map(part => {
           const { center: cPart, vertices: vLocal } = centerVertices(part);
-          return {
-            type: 'ConvexHull',
-            position: cPart as Vec2,
-            rotation: 0,
-            vertices: ensureClockwise(vLocal as any)
-          } as ConvexHullCollider;
+          return { type: 'ConvexHull', position: cPart as Vec2, rotation: 0, vertices: ensureClockwise(vLocal as any) } as ConvexHullCollider;
         });
-
         const out: CompoundCollider = { type: 'Compound', position: polyCenter as Vec2, rotation: 0, children };
         reporter.bump('Compound');
         return out;
       } else {
-        const out: ConvexHullCollider = {
-          type: 'ConvexHull',
-          position: polyCenter as Vec2,
-          rotation: 0,
-          vertices: centered as any
-        };
+        const out: ConvexHullCollider = { type: 'ConvexHull', position: polyCenter as Vec2, rotation: 0, vertices: centered as any };
         reporter.bump('ConvexHull');
         return out;
       }
@@ -124,11 +120,10 @@ function buildSingleCollider(node: SceneNode, go: GroupNode, level: FrameNode, r
     case 'Trimesh': {
       const worldVertsTL = getWorldPolygonVertices(node);
       const vertsRapierWorld = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
-      const goPos: Vec2 = getPositionWithAnchorAdjustment(go, level);
       const goRot = getNodeRotation(go);
-      const vertsGoLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, goPos, goRot));
+      const vertsRBLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, anchor, goRot)); // CHANGED
 
-      const cw = ensureClockwise(vertsGoLocal as any);
+      const cw = ensureClockwise(vertsRBLocal as any);
       const { center, vertices } = centerVertices(cw);
       const { indices } = triangulateConcave(vertices as any);
       const out: TrimeshCollider = { type:'Trimesh', position: center as Vec2, rotation: 0, triangles: { vertices: vertices as any, indices } };
@@ -138,11 +133,10 @@ function buildSingleCollider(node: SceneNode, go: GroupNode, level: FrameNode, r
     case 'Polyline': {
       const worldVertsTL = getWorldPolygonVertices(node);
       const vertsRapierWorld = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
-      const goPos: Vec2 = getPositionWithAnchorAdjustment(go, level);
       const goRot = getNodeRotation(go);
-      const vertsGoLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, goPos, goRot));
+      const vertsRBLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, anchor, goRot)); // CHANGED
 
-      const { center, vertices } = centerVertices(vertsGoLocal as any);
+      const { center, vertices } = centerVertices(vertsRBLocal as any);
       const out: PolylineCollider = { type:'Polyline', position: center as Vec2, rotation: 0, vertices: vertices as any };
       reporter.bump('Polyline');
       return out;
@@ -150,47 +144,39 @@ function buildSingleCollider(node: SceneNode, go: GroupNode, level: FrameNode, r
     case 'Compound': {
       if (!('children' in node)) { reporter.warn(`Compound collider must be Group/Frame.`); return null; }
 
-      // Recursively collect all Collider:* descendants (not just direct children)
       const colliderDescendants = collectColliderDescendants(node as any);
       if (colliderDescendants.length === 0) {
         reporter.warn(`${node.name} has no Collider:* descendants.`);
       }
 
-      // Children build relative to the Compound container
       const children = colliderDescendants
         .map((c: SceneNode) => buildChildRelativeToParent(c, node as SceneNode, level, reporter))
         .filter(Boolean) as ColliderData[];
 
-      const localPos = localOffsetBetween(node, go, level);
+      // Position this compound relative to the RB anchor (not GO)
+      const localPos = localOffsetToAnchor(node, anchor, level);        // CHANGED
       const localRot = getNodeRotation(node) - getNodeRotation(go);
 
-      const out: CompoundCollider = { type: 'Compound', position: localPos, rotation: localRot, children };
+      const out: CompoundCollider = { type: 'Compound', position: localPos as Vec2, rotation: localRot, children };
       reporter.bump('Compound');
       return out;
     }
     case 'SimplifiedConvex': {
-      // 1) Мировые вершины фигуры
       const worldVertsTL = getWorldPolygonVertices(node);
       const vertsRapierWorld = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
 
-      // 2) В локальные координаты GO (запекаем поворот/flip в вершины)
-      const goPos: Vec2 = getPositionWithAnchorAdjustment(go, level);
       const goRot = getNodeRotation(go);
-      const vertsGoLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, goPos, goRot));
+      const vertsRBLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, anchor, goRot)); // CHANGED
 
-      // 3) Считываем кастомные параметры
-      const params = findCustomParams(go); // уже есть в файле
+      const params = findCustomParams(go);
       const eps = params.simplifyEpsilon ? parseFloat(params.simplifyEpsilon) : 1.5;
       const maxPts = params.simplifyMaxPoints ? parseInt(params.simplifyMaxPoints, 10) : Number.POSITIVE_INFINITY;
 
-      // 4) Упрощаем контур (RDP), сохраняем ориентацию CW
-      const simplifiedCW = simplifyPolygon(vertsGoLocal as any, { epsilon: eps, maxPoints: maxPts });
+      const simplifiedCW = simplifyPolygon(vertsRBLocal as any, { epsilon: eps, maxPoints: maxPts });
 
-      // 5) Центрируем упрощённый полигон
       const { center: polyCenter, vertices: centered } = centerVertices(simplifiedCW);
-
-      // 6) Если невыпуклый — декомпозиция (в ЛОКАЛЬНОЙ системе GO)
       const needDecomp = !isConvexSafe(centered) && centered.length > 3;
+
       if (needDecomp) {
         const parts = decomposeIfNeeded(centered);
         const children = parts.map(part => {
@@ -295,5 +281,57 @@ function buildChildRelativeToParent(
       reporter.warn(`Unsupported collider type: ${type}`);
       return null;
   }
+}
+
+// add near the top of builders.ts
+function colliderLeafNodes(root: SceneNode): SceneNode[] {
+  // get Collider:* leaves (skip "Compound" wrappers themselves)
+  const all = collectColliderDescendants(root);
+  return all.filter(n => !/^Collider:\s*Compound\b/.test(n.name));
+}
+
+function colliderWorldPointsRapier(nodes: SceneNode[], level: FrameNode): Vec2[] {
+  const pts: Vec2[] = [];
+  for (const n of nodes) {
+    const worldVertsTL = getWorldPolygonVertices(n);
+    pts.push(...worldVertsTL.map(p => toRapierFromFigmaWorld(p, level)) as Vec2[]);
+  }
+  return pts;
+}
+
+function aabbCenter(points: Vec2[]): Vec2 {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x,y] of points) {
+    if (x < minX) minX = x; if (y < minY) minY = y;
+    if (x > maxX) maxX = x; if (y > maxY) maxY = y;
+  }
+  return [(minX + maxX) * 0.5, (minY + maxY) * 0.5];
+}
+
+function computeRigidBodyCenter(go: GroupNode, level: FrameNode): Vec2 {
+  const directColliders = go.children.filter(n => n.name.trim().startsWith('Collider:'));
+  if (directColliders.length === 0) {
+    // no colliders — fall back to group visual center (previous behavior)
+    return getPositionWithAnchorAdjustment(go, level) as Vec2;
+  }
+  // collect all collider leaves from each top-level collider (flatten compound)
+  const leaves: SceneNode[] = [];
+  for (const c of directColliders) {
+    if (/^Collider:\s*Compound\b/.test(c.name)) {
+      leaves.push(...colliderLeafNodes(c));
+    } else {
+      leaves.push(c);
+    }
+  }
+  const pts = colliderWorldPointsRapier(leaves, level);
+  if (pts.length === 0) {
+    return getPositionWithAnchorAdjustment(go, level) as Vec2;
+  }
+  return aabbCenter(pts);
+}
+
+function localOffsetToAnchor(node: SceneNode, anchorRapier: Vec2, level: FrameNode): Vec2 {
+  const c = getPositionWithAnchorAdjustment(node, level) as Vec2; // node’s world center → Rapier
+  return [c[0] - anchorRapier[0], c[1] - anchorRapier[1]];
 }
 

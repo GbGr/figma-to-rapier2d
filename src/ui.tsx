@@ -141,16 +141,26 @@ function drawLevelPreview(canvas: HTMLCanvasElement, level: any) {
 
   const view = autoViewport(level, canvas);
 
-  // рамка уровня
+  // level frame
   const tl = rapierToCanvas([-level.width/2, level.height/2], level, view);
   const br = rapierToCanvas([ level.width/2,-level.height/2], level, view);
   ctx.strokeStyle = '#888';
   drawPolygon(ctx, [[tl[0],tl[1]],[br[0],tl[1]],[br[0],br[1]],[tl[0],br[1]]]);
 
-  ctx.strokeStyle = '#24a0ff';
+  // colliders + RB center markers
   for (const go of level.gameObjects as any[]) {
-    if (!go.collider) continue;
-    drawCollider(ctx, go.collider, go, { width: level.width, height: level.height }, view);
+    if (go.collider) {
+      ctx.strokeStyle = '#24a0ff';
+      drawCollider(ctx, go.collider, go, { width: level.width, height: level.height }, view);
+    }
+
+    // RigidBody center (GameObject.position) — constant pixel size
+    const centerPx = rapierToCanvas(go.position as Vec2, level, view);
+    ctx.save();
+    ctx.strokeStyle = '#e33';
+    ctx.lineWidth = 1.5;
+    drawCrosshair(ctx, centerPx, 6);
+    ctx.restore();
   }
 }
 
@@ -240,3 +250,18 @@ function App() {
 
 const root = createRoot(document.getElementById('root')!);
 root.render(<App />);
+
+function drawCrosshair(ctx: CanvasRenderingContext2D, p: Vec2, size = 6) {
+  const [x, y] = p;
+  ctx.beginPath();
+  ctx.moveTo(x - size, y);
+  ctx.lineTo(x + size, y);
+  ctx.moveTo(x, y - size);
+  ctx.lineTo(x, y + size);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(x, y, size * 0.5, 0, Math.PI * 2);
+  ctx.stroke();
+}
+

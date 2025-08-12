@@ -13,7 +13,7 @@ This Figma plugin exports physics colliders from level designs directly into rea
     - `Trimesh` → Concave polygon, triangulated
     - `Polyline` → Open polyline
     - `Compound` → Group of colliders
-    - `` → Simplified convex polygon with configurable vertex reduction
+    - `SimplifiedConvex` → Simplified convex polygon with configurable vertex reduction
 - **Body types**: `Static`, `Dynamic`, `Kinematic`
 - **Custom parameters** for physics properties and simplification settings
 - **Matrix transformation handling**: rotation, position, scale, mirroring (flip)

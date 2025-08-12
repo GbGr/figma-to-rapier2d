@@ -4,6 +4,39 @@ import decomp from 'poly-decomp';
 
 export type Vec2 = [number, number];
 
+export function centroidArea(poly: Vec2[]): Vec2 {
+  let a2 = 0;      // удвоенная площадь (Σ cross)
+  let cx6 = 0;     // 6 * A * cx
+  let cy6 = 0;     // 6 * A * cy
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const [x0,y0] = poly[i];
+    const [x1,y1] = poly[(i+1) % n];
+    const cross = x0*y1 - x1*y0;
+    a2  += cross;
+    cx6 += (x0 + x1) * cross;
+    cy6 += (y0 + y1) * cross;
+  }
+  const eps = 1e-12;
+  if (Math.abs(a2) < eps) {
+    // Почти нулевая площадь (линии/полилинии/вырожденные контуры) — fallback на среднее по вершинам
+    let sx = 0, sy = 0;
+    for (const [x,y] of poly) { sx += x; sy += y; }
+    const m = Math.max(1, poly.length);
+    return [sx / m, sy / m];
+  }
+  const cx = cx6 / (3 * a2);
+  const cy = cy6 / (3 * a2);
+  return [cx, cy];
+}
+
+// ЗАМЕНА: было среднее по вершинам; теперь — площадной центроид с fallback.
+export function centerVertices(poly: Vec2[]): { center: Vec2, vertices: Vec2[] } {
+  const c = centroidArea(poly);
+  const v = poly.map(([x,y]) => [x - c[0], y - c[1]] as Vec2);
+  return { center: c, vertices: v };
+}
+
 export function areaSigned(poly: Vec2[]): number {
   let a = 0;
   for (let i=0; i<poly.length; i++) {
@@ -28,11 +61,11 @@ export function centroid(poly: Vec2[]): Vec2 {
   return [cx/poly.length, cy/poly.length];
 }
 
-export function centerVertices(poly: Vec2[]): { center: Vec2, vertices: Vec2[] } {
-  const c = centroid(poly);
-  const v = poly.map(([x,y]) => [x-c[0], y-c[1]] as Vec2);
-  return { center: c, vertices: v };
-}
+// export function centerVertices(poly: Vec2[]): { center: Vec2, vertices: Vec2[] } {
+//   const c = centroid(poly);
+//   const v = poly.map(([x,y]) => [x-c[0], y-c[1]] as Vec2);
+//   return { center: c, vertices: v };
+// }
 
 export function triangulateConcave(vertices: Vec2[]): { vertices: Vec2[], indices: number[] } {
   // Earcut expects flat array [x0,y0,x1,y1,...] in CCW Y-down, but we use Y-up CW.

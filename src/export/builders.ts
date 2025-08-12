@@ -47,24 +47,25 @@ function findCustomParams(go: GroupNode): Record<string,string> {
   return params;
 }
 
-function buildCollider(go: GroupNode, level: FrameNode, reporter: Reporter, anchor: Vec2): ColliderData | null {
-  // If there are multiple Collider:* nodes, wrap in Compound
+function buildCollider(go: GroupNode, level: FrameNode, reporter: Reporter, anchor?: Vec2): ColliderData | null {
   const colliders = go.children.filter(n => n.name.startsWith('Collider:'));
   if (colliders.length === 0) { reporter.warn(`GameObject ${go.name} has no Collider:* node.`); return null; }
-  if (colliders.length > 1) {
-    const children = colliders.map(n => buildSingleCollider(n, go, level, reporter, anchor)).filter(Boolean) as ColliderData[];
-    const compound: CompoundCollider = {
-      type: 'Compound',
-      position: [0,0],
-      rotation: 0,
-      children
-    };
-    reporter.bump('Compound');
-    return compound;
-  }
-  return buildSingleCollider(colliders[0], go, level, reporter, anchor);
-}
 
+  const built = (colliders.length > 1)
+    ? ({
+      type: 'Compound',
+      position: [0,0] as Vec2,
+      rotation: 0,
+      children: colliders
+        .map((n) => buildSingleCollider(n, go, level, reporter, anchor ?? getPositionWithAnchorAdjustment(go, level)))
+        .filter(Boolean) as ColliderData[]
+    } as CompoundCollider)
+    : buildSingleCollider(colliders[0], go, level, reporter, anchor ?? getPositionWithAnchorAdjustment(go, level));
+
+  if (!built) return null;
+
+  return toRigidBodyLocal(built);
+}
 function buildSingleCollider(node: SceneNode, go: GroupNode, level: FrameNode, reporter: Reporter, anchor: Vec2): ColliderData | null {
   if (!node.name.startsWith('Collider:')) return null;
   const type = node.name.replace(/^Collider:/,'').trim();
@@ -252,23 +253,65 @@ function buildChildRelativeToParent(
       return { type: 'Ball', position, rotation, radius } as BallCollider;
     }
     case 'Convex': {
-      const worldVertsTL = getWorldPolygonVertices(child);
-      const vertsRapier = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
-      const { vertices } = centerVertices(ensureClockwise(vertsRapier));
-      return { type: 'ConvexHull', position, rotation, vertices } as ConvexHullCollider;
+      // Вершины → локаль родителя Compound
+      const vertsParentLocal = vertsInParentLocal(child, parent, level);
+
+      // Нормализуем ориентацию, центрируем по площадному центроиду
+      const cw = ensureClockwise(vertsParentLocal as any);
+      const { center: polyCenterLocal, vertices: centered } = centerVertices(cw);
+
+      // Если после упрощения/нормализации форма невыпуклая — разложим локально
+      const needDecomp = !isConvexSafe(centered as any) && centered.length > 3;
+      if (needDecomp) {
+        const parts = decomposeIfNeeded(centered as any);
+        const children = parts.map(part => {
+          const { center: cPart, vertices: vLocal } = centerVertices(part as any);
+          return {
+            type: 'ConvexHull',
+            position: cPart as Vec2,
+            rotation: 0,
+            vertices: ensureClockwise(vLocal as any)
+          } as ConvexHullCollider;
+        });
+        return {
+          type: 'Compound',
+          position: polyCenterLocal as Vec2,
+          rotation: 0,
+          children
+        } as CompoundCollider;
+      } else {
+        return {
+          type: 'ConvexHull',
+          position: polyCenterLocal as Vec2,
+          rotation: 0,
+          vertices: centered as any
+        } as ConvexHullCollider;
+      }
     }
+
     case 'Trimesh': {
-      const worldVertsTL = getWorldPolygonVertices(child);
-      const vertsRapier = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
-      const { vertices } = centerVertices(ensureClockwise(vertsRapier));
-      const { indices } = triangulateConcave(vertices);
-      return { type: 'Trimesh', position, rotation, triangles: { vertices, indices } } as TrimeshCollider;
+      const vertsParentLocal = vertsInParentLocal(child, parent, level);
+      const cw = ensureClockwise(vertsParentLocal as any);
+      const { center: polyCenterLocal, vertices } = centerVertices(cw);
+      const { indices } = triangulateConcave(vertices as any);
+      return {
+        type: 'Trimesh',
+        position: polyCenterLocal as Vec2,
+        rotation: 0,
+        triangles: { vertices: vertices as any, indices }
+      } as TrimeshCollider;
     }
+
     case 'Polyline': {
-      const worldVertsTL = getWorldPolygonVertices(child);
-      const vertsRapier = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
-      const { vertices } = centerVertices(vertsRapier);
-      return { type: 'Polyline', position, rotation, vertices } as PolylineCollider;
+      const vertsParentLocal = vertsInParentLocal(child, parent, level);
+      // Для полилинии ориентация не важна — просто центрируем
+      const { center: polyCenterLocal, vertices } = centerVertices(vertsParentLocal as any);
+      return {
+        type: 'Polyline',
+        position: polyCenterLocal as Vec2,
+        rotation: 0,
+        vertices: vertices as any
+      } as PolylineCollider;
     }
     case 'Compound': {
       // Nested Compound -> recursion
@@ -276,6 +319,56 @@ function buildChildRelativeToParent(
         .map((gc: SceneNode) => buildChildRelativeToParent(gc, child as SceneNode, level, reporter))
         .filter(Boolean) as ColliderData[];
       return { type: 'Compound', position, rotation, children: nestedChildren } as CompoundCollider;
+    }
+    case 'SimplifiedConvex': {
+      // 1) Вершины в мире → Rapier мир
+      const worldVertsTL = getWorldPolygonVertices(child);
+      const vertsRapierWorld = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
+
+      // 2) В локаль РОДИТЕЛЯ Compound (снимаем трансформ родителя)
+      const parentAnchor = getPositionWithAnchorAdjustment(parent, level) as Vec2;
+      const parentRot = getNodeRotation(parent);
+      const vertsParentLocal = vertsRapierWorld.map(v => toGoLocal(v as Vec2, parentAnchor, parentRot));
+
+      // 3) Параметры упрощения — с ближайшего GameObject
+      const ownerGO = findOwningGameObject(child);
+      const params = ownerGO ? findCustomParams(ownerGO) : {};
+      const eps = params.simplifyEpsilon ? parseFloat(params.simplifyEpsilon) : 1.5;
+      const maxPts = params.simplifyMaxPoints ? parseInt(params.simplifyMaxPoints, 10) : Number.POSITIVE_INFINITY;
+
+      // 4) Упрощаем, центрируем в локале родителя
+      const simplifiedCW = simplifyPolygon(vertsParentLocal as any, { epsilon: eps, maxPoints: maxPts });
+      const { center: polyCenterLocal, vertices: centered } = centerVertices(simplifiedCW);
+
+      // 5) Если невыпуклый — локальная декомпозиция в несколько ConvexHull
+      const needDecomp = !isConvexSafe(centered as any) && centered.length > 3;
+      if (needDecomp) {
+        const parts = decomposeIfNeeded(centered as any);
+        const children = parts.map(part => {
+          const { center: cPart, vertices: vLocal } = centerVertices(part as any);
+          return {
+            type: 'ConvexHull',
+            position: cPart as Vec2,   // локально относительно polyCenterLocal
+            rotation: 0,
+            vertices: ensureClockwise(vLocal as any)
+          } as ConvexHullCollider;
+        });
+        // Вкладываем как Compound-ребёнка у исходного Compound
+        return {
+          type: 'Compound',
+          position: polyCenterLocal as Vec2, // локаль родителя
+          rotation: 0,
+          children
+        } as CompoundCollider;
+      } else {
+        // Обычный выпуклый случай
+        return {
+          type: 'ConvexHull',
+          position: polyCenterLocal as Vec2, // локаль родителя
+          rotation: 0,
+          vertices: centered as any
+        } as ConvexHullCollider;
+      }
     }
     default:
       reporter.warn(`Unsupported collider type: ${type}`);
@@ -334,4 +427,64 @@ function localOffsetToAnchor(node: SceneNode, anchorRapier: Vec2, level: FrameNo
   const c = getPositionWithAnchorAdjustment(node, level) as Vec2; // node’s world center → Rapier
   return [c[0] - anchorRapier[0], c[1] - anchorRapier[1]];
 }
+
+function findOwningGameObject(node: SceneNode): GroupNode | null {
+  let p: SceneNode | null = (node as any).parent ?? null;
+  while (p) {
+    if (p.type === 'GROUP' && p.name.startsWith('GameObject:')) {
+      return p as GroupNode;
+    }
+    p = (p as any).parent ?? null;
+  }
+  return null;
+}
+
+// --- helpers (положи рядом с остальными утилитами в builders.ts) ---
+type V2 = [number, number];
+
+function vAdd(a: V2, b: V2): V2 { return [a[0]+b[0], a[1]+b[1]]; }
+function vRot(p: V2, ang: number): V2 {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  return [p[0]*c - p[1]*s, p[0]*s + p[1]*c];
+}
+
+type Pose = { p: V2; r: number };
+function composePose(a: Pose, b: Pose): Pose {
+  // сначала a, затем b
+  return { p: vAdd(a.p, vRot(b.p, a.r)), r: a.r + b.r };
+}
+
+function cloneLeafWithPose<T extends ColliderData>(leaf: T, pose: Pose): T {
+  // применяем накопленную позу к листу
+  const pos = vAdd(pose.p, vRot(leaf.position, pose.r)) as V2;
+  const rot = pose.r + (leaf.rotation || 0);
+  return { ...leaf, position: pos, rotation: rot } as T;
+}
+
+function flattenColliderTree(node: ColliderData, acc: Pose): ColliderData[] {
+  if (node.type === 'Compound') {
+    const here = composePose(acc, { p: node.position, r: node.rotation || 0 });
+    const out: ColliderData[] = [];
+    for (const ch of node.children) out.push(...flattenColliderTree(ch, here));
+    return out;
+  }
+  return [cloneLeafWithPose(node as any, acc)];
+}
+
+// Удобный пост-проход: в RB-локале вернуть либо один лист, либо Compound с детьми
+function toRigidBodyLocal(c: ColliderData): ColliderData {
+  const leaves = flattenColliderTree(c, { p: [0,0], r: 0 });
+  if (leaves.length === 1) return leaves[0];
+  return { type: 'Compound', position: [0,0], rotation: 0, children: leaves } as CompoundCollider;
+}
+
+// рядом с остальными импортами и утилитами
+function vertsInParentLocal(child: SceneNode, parent: SceneNode, level: FrameNode): Vec2[] {
+  const worldVertsTL = getWorldPolygonVertices(child);
+  const vertsRapierWorld = worldVertsTL.map(p => toRapierFromFigmaWorld(p, level));
+  const parentAnchor = getPositionWithAnchorAdjustment(parent, level) as Vec2;
+  const parentRot = getNodeRotation(parent);
+  return vertsRapierWorld.map(v => toGoLocal(v as Vec2, parentAnchor, parentRot));
+}
+
 

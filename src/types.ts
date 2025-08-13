@@ -3,7 +3,7 @@ export interface LevelData {
   width: number;
   height: number;
   gameObjects: GameObjectData[];
-  meta: { version: string; timestamp: string; warnings: string[]; stats: ExportStats };
+  meta: { version: string; timestamp: string; warnings: string[]; stats: ExportStats; units?: { pixelsPerUnit: number } };
 }
 
 export interface ExportStats {

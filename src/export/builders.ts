@@ -6,23 +6,22 @@ import {
 import type { GameObjectData, ColliderData, CuboidCollider, BallCollider, ConvexHullCollider, TrimeshCollider, PolylineCollider, CompoundCollider } from '../types';
 import { Reporter } from './reporter';
 
-export function buildGameObject(go: GroupNode, level: FrameNode, reporter: Reporter): GameObjectData {
+type GameObjectHost = GroupNode | FrameNode | InstanceNode | ComponentNode;
+
+export function buildGameObject(go: GameObjectHost, level: FrameNode, reporter: Reporter): GameObjectData {
   const name = go.name.replace(/^GameObject:/, '').trim();
 
-  // NEW: use rigid body AABB center
-  const rbCenter = computeRigidBodyCenter(go, level);
+  const rbCenter = computeRigidBodyCenter(go as any, level);
 
   const rotation = getNodeRotation(go);
   const bodyType = findBodyType(go) || 'Static';
   const customParams = findCustomParams(go);
-
-  // pass the rbCenter down so colliders are relative to it
   const collider = buildCollider(go, level, reporter, rbCenter);
 
   return { name, position: rbCenter, rotation, collider, bodyType, customParams };
 }
 
-function findBodyType(go: GroupNode): GameObjectData['bodyType'] | null {
+function findBodyType(go: GameObjectHost): GameObjectData['bodyType'] | null {
   for (const n of go.children) {
     if (n.type === 'TEXT' && n.name.startsWith('BodyType:')) {
       const t = n.name.replace(/^BodyType:/,'').trim();
@@ -32,7 +31,7 @@ function findBodyType(go: GroupNode): GameObjectData['bodyType'] | null {
   return null;
 }
 
-function findCustomParams(go: GroupNode): Record<string,string> {
+function findCustomParams(go: GameObjectHost): Record<string,string> {
   const params: Record<string,string> = {};
   for (const n of go.children) {
     if (n.type === 'TEXT' && n.name.startsWith('CustomParam:')) {
@@ -47,7 +46,7 @@ function findCustomParams(go: GroupNode): Record<string,string> {
   return params;
 }
 
-function buildCollider(go: GroupNode, level: FrameNode, reporter: Reporter, anchor?: Vec2): ColliderData | null {
+function buildCollider(go: GameObjectHost, level: FrameNode, reporter: Reporter, anchor: Vec2): ColliderData | null {
   const colliders = go.children.filter(n => n.name.startsWith('Collider:'));
   if (colliders.length === 0) { reporter.warn(`GameObject ${go.name} has no Collider:* node.`); return null; }
 
@@ -57,16 +56,16 @@ function buildCollider(go: GroupNode, level: FrameNode, reporter: Reporter, anch
       position: [0,0] as Vec2,
       rotation: 0,
       children: colliders
-        .map((n) => buildSingleCollider(n, go, level, reporter, anchor ?? getPositionWithAnchorAdjustment(go, level)))
+        .map(n => buildSingleCollider(n, go as any, level, reporter, anchor))
         .filter(Boolean) as ColliderData[]
     } as CompoundCollider)
-    : buildSingleCollider(colliders[0], go, level, reporter, anchor ?? getPositionWithAnchorAdjustment(go, level));
+    : buildSingleCollider(colliders[0], go as any, level, reporter, anchor);
 
   if (!built) return null;
-
   return toRigidBodyLocal(built);
 }
-function buildSingleCollider(node: SceneNode, go: GroupNode, level: FrameNode, reporter: Reporter, anchor: Vec2): ColliderData | null {
+
+function buildSingleCollider(node: SceneNode, go: GameObjectHost, level: FrameNode, reporter: Reporter, anchor: Vec2): ColliderData | null {
   if (!node.name.startsWith('Collider:')) return null;
   const type = node.name.replace(/^Collider:/,'').trim();
 
@@ -428,11 +427,12 @@ function localOffsetToAnchor(node: SceneNode, anchorRapier: Vec2, level: FrameNo
   return [c[0] - anchorRapier[0], c[1] - anchorRapier[1]];
 }
 
-function findOwningGameObject(node: SceneNode): GroupNode | null {
+function findOwningGameObject(node: SceneNode): GameObjectHost | null {
   let p: SceneNode | null = (node as any).parent ?? null;
   while (p) {
-    if (p.type === 'GROUP' && p.name.startsWith('GameObject:')) {
-      return p as GroupNode;
+    if (p.name.startsWith('GameObject:')) {
+      if (p.type === 'GROUP' || p.type === 'FRAME' || p.type === 'INSTANCE' || p.type === 'COMPONENT')
+        return p as GameObjectHost;
     }
     p = (p as any).parent ?? null;
   }

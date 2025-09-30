@@ -7,6 +7,10 @@ type V2 = [number, number];
 function svec([x,y]: V2, s: number): V2 { return [x*s, y*s]; }
 function sverts(vs: V2[], s: number): V2[] { return vs.map(v => svec(v, s)); }
 
+// было: function findGameObjects(level: FrameNode): GroupNode[]
+// станет унифицированный тип и логика
+type GameObjectHost = GroupNode | FrameNode | InstanceNode | ComponentNode;
+
 /**
  * Export levels from the current Figma page.
  * @param ppm Pixels per meter (or another unit).
@@ -65,18 +69,6 @@ function findLevelBlocks(nodes: ReadonlyArray<SceneNode>): FrameNode[] {
   return out;
 }
 
-function findGameObjects(level: FrameNode): GroupNode[] {
-  const out: GroupNode[] = [];
-  const walk = (nodes: ReadonlyArray<SceneNode>) => {
-    for (const n of nodes) {
-      if (n.type === 'GROUP' && n.name.startsWith('GameObject:')) out.push(n as GroupNode);
-      if ('children' in n) walk((n as any).children as SceneNode[]);
-    }
-  };
-  walk(level.children);
-  return out;
-}
-
 function scaleCollider(c: any, s: number): any {
   switch (c?.type) {
     case 'Cuboid':
@@ -120,5 +112,23 @@ function scaleLevel(level: LevelData, s: number): LevelData {
       units: { pixelsPerUnit: (level.meta as any).units?.pixelsPerUnit ?? (1 / s === 0 ? 1 : 1 / s) }
     } as any
   };
+}
+
+function findGameObjects(level: FrameNode): GameObjectHost[] {
+  const out: GameObjectHost[] = [];
+  const isGOContainer = (n: SceneNode): n is GameObjectHost => {
+    return typeof n.name === 'string'
+      && n.name.startsWith('GameObject:')
+      && (n.type === 'GROUP' || n.type === 'FRAME' || n.type === 'INSTANCE' || n.type === 'COMPONENT');
+  };
+
+  const walk = (nodes: ReadonlyArray<SceneNode>) => {
+    for (const n of nodes) {
+      if (isGOContainer(n)) out.push(n as GameObjectHost);
+      if ('children' in n) walk((n as any).children as SceneNode[]);
+    }
+  };
+  walk(level.children);
+  return out;
 }
 
